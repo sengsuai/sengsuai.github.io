@@ -134,6 +134,9 @@ tr:last-child td{border-bottom:0}
 .tag.err{background:#FBE6E3;color:var(--err)}
 .tag.gray{background:#F0EBE4;color:var(--ink2)}
 .empty{padding:36px 12px;text-align:center;color:var(--ink2);font-size:13px}
+.empty.tight{padding:18px 12px}
+.dual{display:grid;gap:0}
+@media (min-width:900px){.dual{grid-template-columns:1fr 1fr;gap:12px;align-items:start}}
 .empty .big{font-size:30px;display:block;margin-bottom:8px;opacity:.4}
 
 /* ---------- 弹窗 ---------- */
@@ -973,6 +976,12 @@ function staffOfStore(storeId,perm){
     return !s||!s.length||s.includes('*')||s.includes(storeId);
   });
 }
+function docBrief(items,max){
+  max=max||3;
+  const list=items||[];
+  const parts=list.slice(0,max).map(i=>{ const p=prod(i.pid); return (p?p.name:'商品')+' '+qu(i.qty,i.unit||uOf(p)); });
+  return parts.join('、')+(list.length>max?` 等 ${list.length} 项`:'');
+}
 function pushNotice(o){
   if(!Array.isArray(DB.notices)) DB.notices=[];
   const to=(o.to||[]).filter(id=>id&&id!==CUR.id);       // 不给自己发
@@ -1002,10 +1011,10 @@ function openNotices(){
     </div>
     ${list.length?list.map(n=>{
       const unread=!(n.read||[]).includes(CUR.id);
-      return `<div class="notice-row ${unread?'unread':''}">
+      return `<div class="notice-row ${unread?'unread':''}" style="cursor:pointer" data-nid="${n.id}">
         <div class="ic2">${ic[n.type]||'✎'}</div>
         <div class="body"><b>${esc(n.title)}</b>${n.body?`<small>${esc(n.body)}</small>`:''}</div>
-        <div class="t">${esc((n.time||'').slice(5,16))}</div></div>`;
+        <div class="t">${esc((n.time||'').slice(5,16))}<div style="font-size:10.5px;color:#A99C8F;margin-top:2px">明细 ›</div></div></div>`;
     }).join(''):'<div class="empty"><span class="big">🔔</span>还没有消息</div>'}
   `,()=>{
     const b=document.getElementById('ntRead');
@@ -1013,6 +1022,58 @@ function openNotices(){
       unreadOfMe().forEach(n=>{ n.read=n.read||[]; if(!n.read.includes(CUR.id)) n.read.push(CUR.id); });
       save(); closeModal(); updateBell(); toast('已全部标记为已读');
     };
+    document.querySelectorAll('[data-nid]').forEach(r=>r.onclick=()=>openNoticeDetail(r.dataset.nid));
+  });
+}
+/* 消息点开直接看明细：出入库单→单据明细；缺货→商品库存与最近流水 */
+function openNoticeDetail(id){
+  const n=(DB.notices||[]).find(x=>x.id===id); if(!n) return;
+  if(!(n.read||[]).includes(CUR.id)){ n.read=n.read||[]; n.read.push(CUR.id); save(); updateBell(); }
+  if(n.type==='in'||n.type==='out'){
+    const arr=n.type==='in'?DB.stockIn:DB.stockOut;
+    const d=arr.find(x=>x.id===n.refId)||arr.find(x=>(n.body||'').includes(x.no)||(n.title||'').includes(x.no));
+    closeModal();
+    if(d){ viewDoc(n.type,d.id); return; }
+    toast('这条消息对应的单据已删除','err'); return;
+  }
+  if(n.type==='stock'){ openStockBrief(n); return; }
+  closeModal();
+  modal(n.title||'消息详情',`
+    <div style="font-size:12.5px;color:#7A6A5C;line-height:1.9;margin-bottom:8px">
+      ${esc(n.from||'')} · ${esc(fmtDate(n.time))}</div>
+    <div style="font-size:13.5px;line-height:1.9;white-space:pre-wrap">${esc(n.body||'（无内容）')}</div>
+    <div class="modal-foot"><button class="btn ghost" data-close>关闭</button></div>`,()=>{});
+}
+function openStockBrief(n){
+  const p=prod(n.refId);
+  closeModal();
+  if(!p){ toast('这条消息的商品已被删除','err'); return; }
+  const total=qtyInStore(n.storeId||currentStoreId,p.id);
+  const ws=whsOf(n.storeId||currentStoreId);
+  const flow=[];
+  DB.stockIn.filter(d=>!d.void&&d.storeId===(n.storeId||currentStoreId)).forEach(d=>d.items.filter(i=>i.pid===p.id).forEach(i=>flow.push({time:d.date,type:'入库',q:i.qty,no:d.no,by:d.user})));
+  DB.stockOut.filter(d=>!d.void&&d.storeId===(n.storeId||currentStoreId)).forEach(d=>d.items.filter(i=>i.pid===p.id).forEach(i=>flow.push({time:d.date,type:'出库',q:-i.qty,no:d.no,by:d.user})));
+  flow.sort((a,b)=>(b.time||'')>(a.time||'')?1:-1);
+  modal('库存不足：'+p.name,`
+    <div class="kpis" style="margin-bottom:12px">
+      <div class="kpi"><div class="t">当前库存</div><div class="v" style="font-size:18px">${qu(total,uOf(p))}</div></div>
+      <div class="kpi"><div class="t">安全库存</div><div class="v" style="font-size:18px">${qu(p.safe,uOf(p))}</div></div>
+      <div class="kpi warn"><div class="t">缺口</div><div class="v" style="font-size:18px">${qu(Math.max(0,p.safe-total),uOf(p))}</div></div>
+    </div>
+    <div style="font-size:12.5px;color:#7A6A5C;margin-bottom:8px">${esc(p.cat||'')} · 单位 ${esc(uOf(p)||'-')} · 进价 ¥${money(p.cost)} · 分仓：${ws.map(w=>esc(w.name)+' '+qu(qtyOf(w.id,p.id),uOf(p))).join(' / ')||'-'}</div>
+    <div class="tbl-wrap"><table><thead><tr><th>时间</th><th>类型</th><th>单号</th><th class="num">数量</th><th>经手</th></tr></thead>
+      <tbody>${flow.length?flow.slice(0,8).map(x=>`<tr><td>${esc((x.time||'').slice(0,16))}</td><td>${x.type}</td>
+        <td style="font-family:ui-monospace,monospace;font-size:11.5px">${esc(x.no)}</td>
+        <td class="num" style="color:${x.q>0?'#1F7A4D':'#B02A1D'}">${x.q>0?'+':''}${qu(Math.abs(x.q),uOf(p))}</td>
+        <td>${esc(x.by)}</td></tr>`).join(''):'<tr><td colspan="5"><div class="empty tight">还没有出入库记录</div></td></tr>'}</tbody></table></div>
+    <div class="modal-foot">
+      <button class="btn ghost" id="ntFlow">看全部流水</button>
+      <button class="btn" id="ntIn">去补货入库</button>
+      <button class="btn ghost" data-close>关闭</button></div>`,()=>{
+    const f=document.getElementById('ntFlow');
+    if(f) f.onclick=()=>{ closeModal(); const w=ws[0]; if(w) flowOf(p.id,w.id); };
+    const b=document.getElementById('ntIn');
+    if(b) b.onclick=()=>{ closeModal(); newDoc('in'); setTimeout(()=>{ const s=document.getElementById('docSearch'); if(s){s.value=p.name; s.oninput({target:s});} },80); };
   });
 }
 function clampStore(){
@@ -1145,7 +1206,8 @@ function viewDashboard(el){
   const max=Math.max(1,...days.map(d=>Math.max(d.inQ,d.outQ)));
   const expRows=expiringRows(currentStoreId);
   const expBad=expRows.filter(r=>r.days<0);
-  const expSoon=expRows.filter(r=>r.days>=0&&r.days<=30);
+  const exp7=expRows.filter(r=>r.days>=0&&r.days<=7);
+  const exp30=expRows.filter(r=>r.days>=0&&r.days<=30);
 
   el.innerHTML=`
     <div class="page-head"><h2>工作台</h2><span class="sp"></span>
@@ -1157,7 +1219,7 @@ function viewDashboard(el){
       <div class="kpi"><div class="t">今日入库单</div><div class="v">${todayIn}<small>单</small></div></div>
       <div class="kpi"><div class="t">今日出库单</div><div class="v">${todayOut}<small>单</small></div></div>
       <div class="kpi warn"><div class="t">预警商品</div><div class="v">${alertList.length}<small>项</small></div></div>
-      <div class="kpi ${expBad.length?'warn':''}"><div class="t">临期/过期批次</div><div class="v">${expBad.length+expSoon.length}<small>批</small></div></div>
+      <div class="kpi ${expRows.length?'warn':''}"><div class="t">临期预警批次</div><div class="v">${expRows.length}<small>批</small></div></div>
     </div>
     ${(()=>{const un=unreadOfMe(); if(!un.length) return '';
       return `<div class="card">
@@ -1168,15 +1230,6 @@ function viewDashboard(el){
         </div>`).join('')}
         <button class="btn ghost block" style="margin-top:10px" id="dashNt">查看全部消息</button>
       </div>`;})()}
-    ${(expBad.length||expSoon.length)?`
-    <div class="card">
-      <h3>临期 / 过期提醒</h3>
-      ${expRows.slice(0,5).map(r=>`<div class="list-item">
-        <div class="g"><b>${esc(r.p.name)}</b><small>${esc(r.wh?.name||'')} · 批次 ${qu(r.b.qty,uOf(r.p))} · 到期 ${esc(r.b.exp)}</small></div>
-        <span class="tag ${r.days<0?'err':'warn'}">${r.days<0?'已过期 '+Math.abs(r.days)+' 天':r.days===0?'今天到期':'剩 '+r.days+' 天'}</span>
-      </div>`).join('')}
-      <button class="btn ghost block" style="margin-top:10px" data-go-exp>查看保质期预警</button>
-    </div>`:''}
     <div class="card">
       <h3>近 7 天出入库</h3>
       <div class="bar-chart">
@@ -1188,20 +1241,34 @@ function viewDashboard(el){
       <div class="legend"><span><i class="dot" style="background:#8C1C13"></i>入库</span>
         <span><i class="dot" style="background:#D4A84B"></i>出库</span></div>
     </div>
+    <div class="dual">
     <div class="card">
       <h3>库存预警 TOP</h3>
-      ${alertList.length?alertList.slice(0,6).map(x=>`
+      ${alertList.length?alertList.slice(0,5).map(x=>`
         <div class="list-item">
           <div class="g"><b>${esc(x.p.name)}</b><small>${esc(x.p.cat||'')} · 安全库存 ${qu(x.p.safe,uOf(x.p))}</small></div>
           <div style="text-align:right"><span class="tag err">缺 ${qu(x.gap,uOf(x.p))}</span>
             <div style="font-size:11.5px;color:#7A6A5C;margin-top:2px">现存 ${qu(x.total,uOf(x.p))}</div></div>
-        </div>`).join(''):'<div class="empty"><span class="big">✓</span>库存充足，暂无预警</div>'}
-      ${alertList.length?`<button class="btn ghost block" style="margin-top:10px" data-go="alerts">查看全部预警</button>`:''}
+        </div>`).join(''):'<div class="empty tight"><span class="big">✓</span>库存充足，暂无预警</div>'}
+      <button class="btn ghost block" style="margin-top:10px" data-go="alerts">查看全部库存预警</button>
+    </div>
+    <div class="card">
+      <h3>临期预警
+        <span class="tag err" style="margin-left:6px">已过期 ${expBad.length}</span>
+        <span class="tag warn" style="margin-left:4px">7 天内 ${exp7.length}</span>
+        <span class="tag gray" style="margin-left:4px">60 天内 ${expRows.length}</span></h3>
+      ${expRows.length?expRows.slice(0,5).map(r=>`<div class="list-item">
+        <div class="g"><b>${esc(r.p.name)}</b><small>${esc(r.wh?.name||'')} · 批次 ${qu(r.b.qty,uOf(r.p))} · 到期 ${esc(r.b.exp)}</small></div>
+        <span class="tag ${r.days<0?'err':r.days<=7?'warn':'gray'}">${r.days<0?'已过期 '+Math.abs(r.days)+' 天':r.days===0?'今天到期':'剩 '+r.days+' 天'}</span>
+      </div>`).join('')
+      :'<div class="empty tight"><span class="big">⏰</span>60 天内没有临期批次<br><span style="font-size:12px;color:#A99C8F">入库时填写到期日，系统会自动在这里预警</span></div>'}
+      <button class="btn ghost block" style="margin-top:10px" data-go-exp>查看全部保质期预警</button>
+    </div>
     </div>`;
   const g=el.querySelector('[data-go]'); if(g) g.onclick=()=>go('alerts');
   const ge=el.querySelector('[data-go-exp]'); if(ge) ge.onclick=()=>{alertTab='exp';go('alerts');};
   const dn=el.querySelector('#dashNt'); if(dn) dn.onclick=()=>openNotices();
-  el.querySelectorAll('[data-nt]').forEach(r=>r.onclick=()=>openNotices());
+  el.querySelectorAll('[data-nt]').forEach(r=>r.onclick=()=>openNoticeDetail(r.dataset.nt));
 }
 
 /* ---------- 商品管理 ---------- */
@@ -1854,7 +1921,7 @@ function newDoc(kind){
         log('入库',doc.no+' 共'+doc.items.length+'项 ¥'+money(doc.total));
         pushNotice({type:'in',storeId:whStore,refId:doc.id,
           title:'新入库单 '+doc.no,
-          body:`${wh(whId)?.name||''} · ${doc.items.length} 项 · ¥${money(doc.total)}${sup?' · '+sup:''} · 经手 ${CUR.name}`,
+          body:`${wh(whId)?.name||''} · ${docBrief(doc.items)} · ¥${money(doc.total)}${sup?' · '+sup:''} · 经手 ${CUR.name}`,
           to:staffOfStore(whStore,'inbound').map(u=>u.id)});
         doc.items.forEach(i=>checkLowStock(whId,i.pid,doc.no));
       }else{
@@ -1873,7 +1940,7 @@ function newDoc(kind){
         log('出库',doc.no+' → '+dept+' · 出库人 '+CUR.name+' 共'+doc.items.length+'项');
         pushNotice({type:'out',storeId:whStore,refId:doc.id,
           title:'新出库单 '+doc.no,
-          body:`${dept} 领用 · ${doc.items.length} 项 · ${wh(whId)?.name||''} · 出库人 ${CUR.name}`,
+          body:`${dept} 领用 · ${docBrief(doc.items)} · ${wh(whId)?.name||''} · 出库人 ${CUR.name}`,
           to:staffOfStore(whStore,'outbound').map(u=>u.id)});
         doc.items.forEach(i=>checkLowStock(whId,i.pid,doc.no));
       }
@@ -3033,7 +3100,7 @@ function confirmImportDoc(kind,items,bad){
         DB.stockIn.unshift(doc); log('导入入库',doc.no+' 共'+doc.items.length+'项 ¥'+money(doc.total));
         pushNotice({type:'in',storeId:whStore,refId:doc.id,
           title:'新入库单 '+doc.no+'（导入）',
-          body:`${wh(whId)?.name||''} · ${doc.items.length} 项 · ¥${money(doc.total)}${sup?' · '+sup:''} · 经手 ${CUR.name}`,
+          body:`${wh(whId)?.name||''} · ${docBrief(doc.items)} · ¥${money(doc.total)}${sup?' · '+sup:''} · 经手 ${CUR.name}`,
           to:staffOfStore(whStore,'inbound').map(u=>u.id)});
         doc.items.forEach(i=>checkLowStock(whId,i.pid,doc.no));
       }else{
@@ -3049,7 +3116,7 @@ function confirmImportDoc(kind,items,bad){
         DB.stockOut.unshift(doc); log('导入出库',doc.no+' → '+dept+' · 出库人 '+CUR.name+' 共'+doc.items.length+'项');
         pushNotice({type:'out',storeId:whStore,refId:doc.id,
           title:'新出库单 '+doc.no+'（导入）',
-          body:`${dept} 领用 · ${doc.items.length} 项 · ${wh(whId)?.name||''} · 出库人 ${CUR.name}`,
+          body:`${dept} 领用 · ${docBrief(doc.items)} · ${wh(whId)?.name||''} · 出库人 ${CUR.name}`,
           to:staffOfStore(whStore,'outbound').map(u=>u.id)});
         doc.items.forEach(i=>checkLowStock(whId,i.pid,doc.no));
       }
